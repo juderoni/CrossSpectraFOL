@@ -24,7 +24,12 @@ def apply_mcws(H, dn, N):
         I[i, :] = np.clip(H[i, :] / p2, 0, 1)
 
     # 2. Morphological Opening/Closing by Reconstruction
-    se = disk(int(dn))
+
+    # originial
+    # se = disk(int(dn))
+
+    safe_dn = max(2, int(dn // 2)) 
+    se = disk(safe_dn)
     
     # Erode & Reconstruct
     Ie = erosion(I, se)

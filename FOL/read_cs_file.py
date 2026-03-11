@@ -2,6 +2,7 @@ import os
 import numpy as np
 import struct
 from datetime import datetime, timedelta
+
 def read_cs_file(filepath):
     if not os.path.exists(filepath):
         print(f"File not found: {filepath}")
@@ -44,12 +45,10 @@ def read_cs_file(filepath):
             
             start_freq_mhz = unpacked[0]
             bandwidth_khz = unpacked[2]
-            sweep_rate_hz = unpacked[1] # This is the true fRepFreqHz
+            sweep_rate_hz = unpacked[1]
             
-            # True Center Frequency = Start Freq + (Bandwidth / 2)
             metadata['freq_mhz'] = start_freq_mhz + (bandwidth_khz / 2000.0)
             metadata['rep_freq_hz'] = sweep_rate_hz
-            
             metadata['doppler_cells'] = unpacked[4]
             metadata['range_cells'] = unpacked[5]
             metadata['range_dist_km'] = unpacked[7]
@@ -58,30 +57,38 @@ def read_cs_file(filepath):
         header_size = v1_extent + 10
         f.seek(header_size)
 
-        # 4. Read the Multi-Dimensional Arrays for Antennas 1, 2, and 3
         n_range = metadata['range_cells']
         n_dopp = metadata['doppler_cells']
         
-        # Pre-allocate a list of 3 arrays
-        ant_spectra = [np.zeros((n_range, n_dopp), dtype=np.float32) for _ in range(3)]
+        # Pre-allocate arrays for Linear Auto and Complex Cross spectra
+        ant_spectra_linear = [np.zeros((n_range, n_dopp), dtype=np.float32) for _ in range(3)]
+        cross_spectra_linear = [np.zeros((n_range, n_dopp), dtype=np.complex64) for _ in range(3)]
 
-        # Bytes to skip (3 Cross-Spectra complexes * 8 bytes each = 24 bytes)
-        bytes_to_skip = 24 * n_dopp
-        if cskind >= 2:
-            bytes_to_skip += 4 * n_dopp # Skip Quality data array
+        quality_bytes_to_skip = 4 * n_dopp if cskind >= 2 else 0
 
         for r in range(n_range):
+            # Read Auto-spectra (Main diagonal of covariance matrix)
             for i in range(3):
-                # Read each antenna in sequence
                 data = np.fromfile(f, dtype='>f4', count=n_dopp)
                 data = np.abs(data)
                 data[data == 0] = 1e-10 
-                ant_spectra[i][r, :] = data
+                ant_spectra_linear[i][r, :] = data
             
-            # Skip the cross-spectra to reach the next range cell
-            f.seek(bytes_to_skip, 1) 
+            # Read Cross-spectra (Upper triangle of covariance matrix)
+            for i in range(3):
+                # >c8 reads 64-bit complex (two 32-bit floats)
+                cross_data = np.fromfile(f, dtype='>c8', count=n_dopp)
+                cross_spectra_linear[i][r, :] = cross_data
+                
+            # Skip quality data array if present
+            if quality_bytes_to_skip > 0:
+                f.seek(quality_bytes_to_skip, 1)
 
-        # Convert all three arrays to dBm
-        ant_spectra_dbm = [10 * np.log10(ant) - 34.2 for ant in ant_spectra]
+        # Convert auto-spectra to dBm for plotting and watershedding
+        ant_spectra_dbm = [10 * np.log10(ant) - 34.2 for ant in ant_spectra_linear]
         
-        return ant_spectra_dbm, metadata
+        # Pack the payload: 
+        # [0:2] = dBm Auto | [3:5] = Linear Auto | [6:8] = Linear Complex Cross
+        spectra_list = ant_spectra_dbm + ant_spectra_linear + cross_spectra_linear
+        
+        return spectra_list, metadata
