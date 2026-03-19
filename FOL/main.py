@@ -58,23 +58,76 @@ def plot_watershed_results(spectra_dbm_list, full_labels_list, alims_list, meta)
     print(f"Extraction plot saved to: {output_filename}")
     plt.close(fig)
 
+def run_antenna_diagnostics(spectra_dbm_list, alims):
+    """
+    Evaluates hardware health by comparing the signal power of the Loops
+    against the Monopole STRICTLY within the verified First Order Limits.
+    """
+    print("\n--- ANTENNA HARDWARE DIAGNOSTICS ---")
+    loop1, loop2, mono = spectra_dbm_list
+    
+    valid_powers_l1, valid_powers_l2, valid_powers_mono = [], [], []
+    
+    # Iterate through all range cells and average the power inside the Bragg peaks
+    for r in range(alims.shape[0]):
+        for col_offset in [0, 2]: # Check both Left (0) and Right (2) Bragg regions
+            start, end = alims[r, col_offset], alims[r, col_offset + 1]
+            if end > start: # If a valid FOL width exists
+                valid_powers_mono.append(np.mean(mono[r, start:end+1]))
+                valid_powers_l1.append(np.mean(loop1[r, start:end+1]))
+                valid_powers_l2.append(np.mean(loop2[r, start:end+1]))
+    
+    if not valid_powers_mono:
+        print("  -> ⚠️ No valid FOL regions found. Cannot run diagnostics.")
+        return
+
+    mean_mono = np.mean(valid_powers_mono)
+    mean_l1 = np.mean(valid_powers_l1)
+    mean_l2 = np.mean(valid_powers_l2)
+    
+    print(f"  Monopole Average Bragg Power: {mean_mono:.1f} dBm")
+    print(f"  Loop 1 Average Bragg Power:   {mean_l1:.1f} dBm")
+    print(f"  Loop 2 Average Bragg Power:   {mean_l2:.1f} dBm")
+    
+    # A healthy loop is usually within 5 to 15 dB of the monopole.
+    # If it drops by 25+ dB, it is likely disconnected, flooded, or blown.
+    DEGRADATION_THRESHOLD_DB = 25.0
+    
+    if (mean_mono - mean_l1) > DEGRADATION_THRESHOLD_DB:
+        print("  -> 🚨 ALARM: Loop 1 appears OUT OF SERVICE or heavily degraded!")
+    else:
+        print("  -> ✅ Loop 1 is operating normally.")
+        
+    if (mean_mono - mean_l2) > DEGRADATION_THRESHOLD_DB:
+        print("  -> 🚨 ALARM: Loop 2 appears OUT OF SERVICE or heavily degraded!")
+    else:
+        print("  -> ✅ Loop 2 is operating normally.")
+    print("------------------------------------\n")
+
 # ==========================================
 # MAIN EXECUTION PIPELINE
 # ==========================================
 if __name__ == "__main__":
+    
+    # --- FEATURE FLAGS ---
+    ENABLE_PLOTTING = True
+    ENABLE_ANTENNA_DIAGNOSTICS = True
+    ENABLE_MUSIC_TEST = True
+    # ---------------------
+
     vel_scale = 40.0
     max_vel = 200.0
     snr_min = 5.0
     rep_freq_hz = 2.0 
 
-    # test_file = "/home/jude/Repositories/CrossSpectraFOL/cross_spectra_samples/CSS_OCRA_25_09_01_0000.cs"
     test_file = "/home/jude/Repositories/CrossSpectraFOL/cross_spectra_samples/CSS_OCRA_23_01_16_0100.cs"
+    
     try:
         print(f"Processing: {test_file}")
         spectra_list, metadata = read_cs_file(test_file)
         
         if spectra_list is not None:
-            true_rep_freq = metadata.get('rep_freq_hz', 1.0) # Defaults to 1.0 if not found
+            true_rep_freq = metadata.get('rep_freq_hz', 1.0) 
             
             iFBragg, v_incr = calculate_radar_physics(
                 metadata['freq_mhz'], 
@@ -84,12 +137,11 @@ if __name__ == "__main__":
             print(f"Sweep Rate: {true_rep_freq} Hz")
             print(f"Calculated Bragg Indices: {iFBragg}")
             
-            # Grab all three arrays for plotting later
             spectra_dbm_list = spectra_list[0:3]
             
-            # 1. Isolate the Monopole (Antenna 3) for FOL processing
+            # 1. Isolate the Monopole for FOL processing
             monopole_dbm = spectra_list[2]
-            print("Extracting limits using Monopole (Antenna 3) data...")
+            print("Extracting limits using Monopole data...")
             
             h2_norm, DN_tuple, N = normalize_background(
                 monopole_dbm, vel_scale, max_vel, v_incr, iFBragg
@@ -102,44 +154,39 @@ if __name__ == "__main__":
             left_labels, _ = apply_mcws(left_half, DN_tuple[0], N)
             right_labels, _ = apply_mcws(right_half, DN_tuple[1], N)
             
-            # STITCH THE LABELS TOGETHER
             monopole_labels = np.zeros_like(monopole_dbm)
             monopole_labels[:, :center] = left_labels
             monopole_labels[:, center:] = right_labels + (right_labels > 0) * np.max(left_labels)
             
-            # THE FINAL EXTRACTION
             monopole_alims = extract_first_order_limits(
                 monopole_dbm, monopole_labels, iFBragg, N, max_vel, v_incr, snr_min
             )
             
-            # 2. Replicate the Monopole limits for Loop 1 and Loop 2 plotting
-            full_labels_list = [monopole_labels, monopole_labels, monopole_labels]
-            alims_list = [monopole_alims, monopole_alims, monopole_alims]
+            # --- RUN TOGGLED FEATURES ---
             
-            # 3. Generate Plot
-            plot_watershed_results(spectra_dbm_list, full_labels_list, alims_list, metadata)
-            print("Pipeline completed successfully. Multi-panel FOL image generated.")
+            if ENABLE_ANTENNA_DIAGNOSTICS:
+                run_antenna_diagnostics(spectra_dbm_list, monopole_alims)
+            
+            if ENABLE_PLOTTING:
+                full_labels_list = [monopole_labels, monopole_labels, monopole_labels]
+                alims_list = [monopole_alims, monopole_alims, monopole_alims]
+                plot_watershed_results(spectra_dbm_list, full_labels_list, alims_list, metadata)
+                print("Multi-panel FOL image generated.")
 
-            # Let's test Range Cell 15
-            test_range = 15
-            
-            # Get the Left Bragg limits for this range cell
-            left_start = monopole_alims[test_range, 0]
-            left_end = monopole_alims[test_range, 1]
-            
-            print(f"\nRunning MUSIC for Range Cell {test_range} (Doppler Bins {left_start} to {left_end}):")
-            
-            # Loop exclusively through the bins that fall INSIDE the First Order Limits
-            for doppler_bin in range(left_start, left_end + 1):
-                # 1. Build the matrix
-                R = build_covariance_matrix(spectra_list, test_range, doppler_bin)
+            if ENABLE_MUSIC_TEST:
+                test_range = 15
+                left_start = monopole_alims[test_range, 0]
+                left_end = monopole_alims[test_range, 1]
                 
-                # 2. Run MUSIC
-                doas, spectrum = calculate_music_doa(R, num_sources=1)
+                print(f"\nRunning MUSIC for Range Cell {test_range} (Doppler Bins {left_start} to {left_end}):")
                 
-                if len(doas) > 0:
-                    velocity = (doppler_bin - iFBragg[0]) * v_incr
-                    print(f"  Bin {doppler_bin}: Velocity = {velocity:+.2f} cm/s | Bearing = {doas[0]:03d}°")
+                for doppler_bin in range(left_start, left_end + 1):
+                    R = build_covariance_matrix(spectra_list, test_range, doppler_bin)
+                    doas, spectrum = calculate_music_doa(R, num_sources=1)
+                    
+                    if len(doas) > 0:
+                        velocity = (doppler_bin - iFBragg[0]) * v_incr
+                        print(f"  Bin {doppler_bin}: Velocity = {velocity:+.2f} cm/s | Bearing = {doas[0]:03d}°")
             
     except Exception as e:
         print(f"An error occurred: {e}")
