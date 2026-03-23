@@ -67,6 +67,8 @@ def read_cs_file(filepath):
             bytes_to_skip += 4 * n_dopp # Skip Quality data array
 
         for r in range(n_range):
+            for pair in range(3): # For 1-2, 1-3, 2-3
+                raw_cross = np.fromfile(f, dtype='>f4', count=n_dopp * 2)
             for i in range(3):
                 # Read each antenna in sequence
                 data = np.fromfile(f, dtype='>f4', count=n_dopp)
